@@ -2,7 +2,7 @@ import time
 
 
 class TimeFrame:
-    def __init__(self, updateTime, timeFrame="h" | "m" | "s") -> None:
+    def __init__(self, timeFrame) -> None:
         self.timeFrame = timeFrame
         self.counter = []
         self.timeHandler = {
