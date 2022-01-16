@@ -1,36 +1,73 @@
-import logging
 import pandas as pd
-import matplotlib.pyplot as plt
+import logging
+from time_frame import TimeFrame
 from trading_ig import IGService, IGStreamService
 from trading_ig.config import config
 from trading_ig.lightstreamer import Subscription
 
-epic = 'IX.D.DAX.IFMM.IP'
-ig_service6 = IGService(config.username, config.password,
-                        config.api_key, config.acc_type)
-ig_service6.create_session()
-
-# account_info = ig_service.switch_account(config.acc_number, False) # not necessary
-# print(account_info)
-
-
-#epic = 'CS.D.EURUSD.MINI.IP'
-resolution = '1min'
-num_points = 40
-response = ig_service6.fetch_historical_prices_by_epic_and_num_points(
-    epic, resolution, num_points)
-df_ask = (response['prices']['ask'] + response['prices']['bid'])/2
-open_pos = ig_service6.fetch_open_positions()
-
 
 class LightStreamer:
-    def __init__(self) -> None:
+    def __init__(self, epic: list, timeFrame) -> None:
         self.connection = IGService(
             config.username, config.password, config.api_key, config.acc_type)
-        self.session = ig_service6.create_session()
+        self.stream = IGStreamService(self.connection)
+        self.session = self.stream.create_session()
+        self.accounts = self.session[u"accounts"]
+        self.accountId = None
+        self.epic = epic
+        self.timeFrame = timeFrame
+        self.timeObject = TimeFrame(self.timeFrame)
+        self.counter = False
+
+    async def init(self):
+        accountId = await self.accountHandler()
+        if(accountId == None):
+            print("No account found")
+            return
+        self.accountId = accountId
+        self.stream.connect(self.accountId)
+        # Making a new Subscription in MERGE mode
+        subscriptionPrices = Subscription(
+            mode="MERGE",
+            items=self.epic,
+            fields=["UPDATE_TIME", "BID", "OFFER",
+                    "CHANGE", "MARKET_STATE"],
+        )
+        # adapter="QUOTE_ADAPTER")
+
+        # Adding the "on_price_update" function to Subscription
+        subscriptionPrices.addlistener(self.onPriceUpdate)
+
+        # Registering the Subscription
+        subKeyPrices = self.stream.ls_client.subscribe(
+            subscriptionPrices)
+
+        # Making an other Subscription in MERGE mode
+        subscriptionAccount = Subscription(
+            mode="MERGE", items=["ACCOUNT:" + accountId], fields=["AVAILABLE_CASH"],
+        )
+        #    #adapter="QUOTE_ADAPTER")
+
+        # Adding the "on_balance_update" function to Subscription
+        subscriptionAccount.addlistener(self.onAccountUpdate)
+
+        # Registering the Subscription
+        subKeyAccount = self.stream.ls_client.subscribe(
+            subscriptionAccount)
+
+        input(
+            "{0:-^80}\n".format(
+                "HIT CR TO UNSUBSCRIBE AND DISCONNECT FROM \
+        LIGHTSTREAMER"
+            )
+        )
+
+        # Disconnecting
+        self.stream.disconnect()
 
     # A simple function acting as a Subscription listener
-    def onPriceUpdate(item_update):
+
+    def onPriceUpdate(self, item_update):
         # print("price: %s " % item_update)
         """
         print(
@@ -43,78 +80,32 @@ class LightStreamer:
         df = pd.DataFrame(data=item_update)
         offer = df.loc['OFFER', :]
         bid = df.loc['BID', :]
-        update_time = df.loc['UPDATE_TIME', :]
+        updateTime = df.loc['UPDATE_TIME', :]
         #print("Price: ", offer['values'], end=" ")
         #print("Time: ", update_time['values'])
+        self.counter = self.timeObject.counter(updateTime)
+        if(self.counter):
+            print("a %d has passed" % self.timeFrame)
 
     def onAccountUpdate(balance_update):
         print("balance: %s " % balance_update)
 
-    def main():
-        logging.basicConfig(level=logging.INFO)
-        # logging.basicConfig(level=logging.DEBUG)
-
-        ig_service = IGService(
-            config.username, config.password, config.api_key, config.acc_type
-        )
-
-        ig_stream_service = IGStreamService(ig_service)
-        ig_session = ig_stream_service.create_session()
-        # Ensure configured account is selected
-        accounts = ig_session[u"accounts"]
-        for account in accounts:
+    # function to open position
+    async def accountHandler(self):
+        for account in self.accounts:
             if account[u"accountId"] == config.acc_number:
                 accountId = account[u"accountId"]
-                break
+                return accountId
             else:
                 print("Account not found: {0}".format(config.acc_number))
-                accountId = None
-        ig_stream_service.connect(accountId)
-        # Making a new Subscription in MERGE mode
-        subscription_prices = Subscription(
-            mode="MERGE",
-            items=["L1:IX.D.DAX.IFMM.IP"],
-            fields=["UPDATE_TIME", "BID", "OFFER", "CHANGE", "MARKET_STATE"],
-        )
-        # adapter="QUOTE_ADAPTER")
+                return
 
-        # Adding the "on_price_update" function to Subscription
-        subscription_prices.addlistener(on_prices_update)
-
-        # Registering the Subscription
-        sub_key_prices = ig_stream_service.ls_client.subscribe(
-            subscription_prices)
-
-        # Making an other Subscription in MERGE mode
-        subscription_account = Subscription(
-            mode="MERGE", items=["ACCOUNT:" + accountId], fields=["AVAILABLE_CASH"],
-        )
-        #    #adapter="QUOTE_ADAPTER")
-
-        # Adding the "on_balance_update" function to Subscription
-        subscription_account.addlistener(on_account_update)
-
-        # Registering the Subscription
-        sub_key_account = ig_stream_service.ls_client.subscribe(
-            subscription_account)
-
-        input(
-            "{0:-^80}\n".format(
-                "HIT CR TO UNSUBSCRIBE AND DISCONNECT FROM \
-        LIGHTSTREAMER"
-            )
-        )
-
-        # Disconnecting
-        ig_stream_service.disconnect()
-
-    # function to open position
-
-    def open_position(direction):
-        response = ig_service6.create_open_position(
+    def open_position(self, direction):
+        response = self.stream.create_open_position(
             currency_code="EUR",
             direction=direction,
-            epic="IX.D.DAX.IFMM.IP",
+            # epic is a list containing subscription objects from IGs rest api
+            epic=self.epic[0],
             expiry="-",
             force_open="false",
             guaranteed_stop="false",
@@ -128,6 +119,3 @@ class LightStreamer:
             stop_level=None,
             trailing_stop_increment=None,
             trailing_stop='false')
-
-    if __name__ == "__main__":
-        main()
